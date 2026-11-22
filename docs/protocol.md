@@ -6,6 +6,29 @@ crates; it does not define new ones. The source of truth for each format is the
 owning repository and its ADR. Application payload schemas are documented
 separately in DOC-09 and remain opaque to the mesh.
 
+## Product names used across repositories
+
+The names below label large subsystems for users and reviewers. They do not
+create crates, repositories or wire formats. Boundaries remain those in
+[ownership.md](ownership.md); function-level paths are in
+[call-stacks.md](call-stacks.md) and diagrams are in
+[architecture.md](architecture.md).
+
+| Name | Subsystem |
+|---|---|
+| Jan | Networking engine: aoNetwork, aoMesh and the runtime orchestrator |
+| Vent | Identity and trust: aoIdents plus contacts, vault and lifecycle |
+| Ark | Store-and-forward at rest and sync |
+| McMohan | Location sessions and offline map |
+| aoheyra | Chat and messaging, and the app/site product name |
+| Hog | The BLE beacon in the scan response used for neighbour discovery |
+
+Hog is introduced here for clarity. Its bytes are still the 16-byte scan-response
+manufacturer payload already owned by aoNetwork and described below; the name
+does not change that layout. Jan discovery is a different thing: a signed
+`Presence` packet carrying an `AppPayload::Profile` with a `jan:v1:` bio marker,
+specified in [jan.md](jan.md).
+
 ## aoMesh packet and capability reference (v1)
 
 Implemented by aoMesh's `packet` and `hello` modules. The byte-level decision
@@ -169,7 +192,7 @@ duplicate-link resolution and status mapping all live in Rust.
 | Channels | `Control` has strict priority; `Message`, `Telemetry` and `Bulk` use deficit round-robin with approximate weights 4:2:1. Queue caps and receive windows are per link. |
 | Frames | Hand-rolled, big-endian version/type bytes with canonical LEB128 lengths. `Hello`, `Data`, `Ping`, `Pong`, `Bye` and `Credit` are decoded with typed errors and bounded before allocation. See the NET-04 ADR. |
 | Fragmentation | A one-byte chunk header (START, END, three-bit sequence); payload per chunk is `MTU - 3 - 1`. One frame is in flight per link. See the NET-05 ADR. |
-| Beacons | A 16-byte scan-response manufacturer payload carrying version, flags, degree, `max_links`, an 8-byte hint and a 4-byte digest. Kotlin passes the bytes through unparsed. See the NET-06 ADR. |
+| Beacons (Hog) | A 16-byte scan-response manufacturer payload carrying version, flags, degree, `max_links`, an 8-byte hint and a 4-byte digest. This payload is called **Hog**. Kotlin passes the bytes through unparsed. See the NET-06 ADR. |
 | Link state | `Connecting → Negotiating → Handshaking → Ready → Closing → Closed`. Both sides send `Hello` when the MTU settles; version overlap, oversize hello and timeout have typed close reasons. |
 | Per-link queueing | Bounded byte caps per channel, coalescing and expiry through `SendOpts { coalesce_key, expires_at }`, and credit-based flow control when both hellos offer it. |
 | Topology | Stable, explore and opportunistic slots; a `max_links` ceiling; inbound links meet the same slots and floor; peer scoring, weak-link shedding and a temporary blacklist for abuse. |
@@ -351,8 +374,12 @@ mesh hello and replay integration.
 aoMesh owns store-and-forward **policy**. It never opens a database, keeps
 application keys or interprets payload bytes. The aoheyra host supplies a
 SQLite `MessageStore` implementation (APP-05) and owns every insert, purge and
-restart file. The current aoheyra `master` branch does not yet contain that
-SQLite implementation; it is a required host seam, not an engine feature.
+restart file. The Rust implementation exists in aoheyra as
+`storage::message_store::SqliteMessageStore` and is opened by
+`Database::open` with a Keystore-provided `DatabaseKey`. The remaining work is
+the Android host integration: the FFI does not yet construct `Database`,
+`SqliteMessageStore` or `Runtime`, so no APK path reaches Ark today. Store policy
+still belongs to aoMesh, not to aoheyra.
 
 ### `MessageStore` contract, quotas and eviction
 
@@ -621,7 +648,10 @@ The implementation names the caps `MAX_TEXT_BYTES = 1024`,
 Text must be non-empty UTF-8 and at most 1024 bytes. A profile name is at most
 32 bytes, a bio at most 160 bytes, and the optional 8-byte avatar hash is an
 opaque application identifier, never an encryption key; its presence is
-signalled by bit 0 of the profile flags. A receipt status is 1 (delivered) or
+signalled by bit 0 of the profile flags. Jan discovery uses this Profile kind
+with `bio` set to `jan:v1:<ten digits>` and carries it in a signed `Presence`
+packet; it introduces no new payload kind or wire field. See [jan.md](jan.md)
+for the record contract and bounds. A receipt status is 1 (delivered) or
 2 (read) and carries the 16-byte id of the message being acknowledged. This is
 the application-level status shown in chat and is distinct from aoMesh's
 internal signed receipt envelope (MSH-17), which never sees an application

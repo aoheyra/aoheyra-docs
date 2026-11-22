@@ -24,7 +24,7 @@ jobs:
       - name: referenced docs exist
         run: |
           set -euo pipefail
-          for f in docs/ownership.md docs/protocol.md docs/operations.md; do
+          for f in docs/ownership.md docs/protocol.md docs/operations.md docs/architecture.md docs/jan.md docs/call-stacks.md; do
             test -s "$f"
           done
       - name: validate DOC-01 ownership map
@@ -56,3 +56,5 @@ jobs:
         run: python3 scripts/check_doc_09.py
       - name: validate DOC-10 diagnostics and data lifecycle
         run: python3 scripts/check_doc_10.py
+      - name: validate DOC-12 architecture and call stacks
+        run: python3 scripts/check_doc_12.py

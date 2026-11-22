@@ -9,6 +9,25 @@ starts from section 2 of the aoheyra Ownership Map and Issue Backlog (3 Nov
 [aoheyra](https://github.com/aoheyra/aoheyra). When an issue assigns a concept
 to a repo, that repo owns it; no other repo implements it.
 
+## Subsystem names
+
+The names below group existing responsibilities for communication. They do not
+change the one-owner table or create new repositories. Full diagrams and
+boundaries are in [architecture.md](architecture.md).
+
+| Name | Responsibility | Repos and issues still authoritative |
+|---|---|---|
+| **Jan** | Networking engine: links, packets, routing, presence, directory, route hints, telemetry and runtime orchestration | aoNetwork, aoMesh, APP-08; Android `:ble` is its radio shim |
+| **Vent** | Identity and trust: keys, `NodeId`, sealed content, contact trust, safety numbers, replay acceptance and keystore seam | aoIdents, APP-06, AND-13 |
+| **Ark** | Store-and-forward at rest: `MessageStore`, quotas, eviction, sync and receipt-driven purge | aoMesh policy, APP-05, APP-15, APP-16 |
+| **McMohan** | Location and offline map: sessions, precision, location source, map data and share UX | APP-12, APP-13, AND-16, AND-17, AND-18 |
+| **aoheyra** | Chat and messaging: conversations, status, unread badges, notifications and composer | APP-09, AND-11 |
+| **Hog** | BLE beacon in the scan response: bounded rotating hint and digest for neighbour discovery | aoNetwork beacon codec, aoIdents rotating tag/hint, AND-05 and AND-06 pass bytes through |
+
+The Jan discovery record is **not** a Hog. Discovery is a signed Presence
+profile described in [jan.md](jan.md); a Hog is the raw radio-local beacon that
+helps two phones notice each other.
+
 ## Concept map
 
 | Concept | Single owner | What the other crates may do | Boundary that must not be crossed |
