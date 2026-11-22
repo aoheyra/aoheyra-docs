@@ -346,3 +346,111 @@ persistence, keystore and OS integration.
 Source: aoIdents `docs/threat-model.md`, `docs/adr/0001-crypto-suite-and-encodings.md`,
 and aoMesh `docs/protocol.md` sections on authenticated local delivery,
 mesh hello and replay integration.
+## Store, sync and receipt lifecycle
+
+aoMesh owns store-and-forward **policy**. It never opens a database, keeps
+application keys or interprets payload bytes. The aoheyra host supplies a
+SQLite `MessageStore` implementation (APP-05) and owns every insert, purge and
+restart file. The current aoheyra `master` branch does not yet contain that
+SQLite implementation; it is a required host seam, not an engine feature.
+
+### `MessageStore` contract, quotas and eviction
+
+`store::MessageStore` is the seam implemented by aoMesh's `MemoryStore`
+reference and by the host backend:
+
+```rust
+fn put(&mut self, now: u64, entry: StoredMessage) -> Result<Vec<MessageId>, StoreError>;
+fn get(&self, now: u64, id: &MessageId) -> Option<&StoredMessage>;
+fn by_destination(&self, now: u64, dst: &NodeId) -> Vec<MessageId>;
+fn summary(&self, now: u64) -> Vec<MessageId>;
+fn expire(&mut self, now: u64) -> Vec<MessageId>;
+fn evict(&mut self, id: &MessageId) -> Option<StoredMessage>;
+```
+
+Results and summaries are lexicographic by `MessageId`. `put` first removes
+expired entries, then evicts within each violated quota scope, and must be
+atomic with its evictions in SQLite. Eviction order is fewest remaining spray
+copies, larger priority number, oldest `first_seen`, then message id.
+Duplicate insertion never refreshes metadata.
+
+| Default quota | Value |
+|---|---:|
+| Entries | 1024 |
+| Total encoded bytes | 2 MiB |
+| Per origin | 256 KiB |
+| Direct | 2 MiB |
+| Broadcast | 512 KiB |
+| Presence | 64 KiB |
+| Telemetry | 0: never stored |
+
+A stored envelope is at most `MAX_PAYLOAD + 512` bytes. Callers verify
+authenticity before insertion; the store parses only the bounded header.
+Local metadata (`copies_left`, `first_seen`, `received_at`, `priority`,
+`received_from`, `age_ms`) is not wire data. Expiry compares relative age plus
+local elapsed time against the sender's lifetime and the class ceiling.
+Remote `created_ms` never decides expiry.
+
+The shared backend suite is exported as `ao_mesh::store::conformance::check`.
+aoMesh runs it against `MemoryStore` with `cargo test --test store`; the host
+must run the same function against a fresh SQLite backend factory. The exact
+copy-pasteable command is in [operations](operations.md).
+
+### Summary, beacon digest and sync
+
+The host submits live ids through `MeshInput::StoreSummary`.
+`sync::StoreSummary` sorts and deduplicates them, exposes sorted eight-byte
+prefixes and hashes the full ids plus count into a four-byte digest. A change
+is debounced 200 ms before one `MeshOutput::SetBeacon`; a change back to the
+published value cancels it, and a backwards clock cannot shorten the wait.
+The digest is a change detector, not a proof of equality.
+
+Sync frames travel on aoNetwork's Bulk channel and are engine-to-engine
+control frames, not signed mesh packets. The items inside them are complete
+encoded mesh packets. The receiving engine checks bounded decode, content
+address and storable class; final signature verification and insertion remain
+with the store owner.
+
+| Capability | Flow |
+|---|---|
+| `CAP_SYNC_V1` (MSH-14) | Five-byte header: magic `0x53`, version `1`, tag `Digest`/`Summary`/`Item`/`Done`, two-byte big-endian length. Summary carries up to 1024 sorted 8-byte prefixes. Missing prefixes produce `MeshOutput::SyncNeed`; the host answers with `MeshInput::SyncItems`. `Done` from both sides precedes `ReleaseOpportunistic`. Per-contact budget 256 KiB, per-frame limit 15 KiB, deadline 20 s. |
+| `CAP_SYNC_V2` (MSH-15) | Preferred when both peers set it. Range keys are a 16-byte prefix plus a bit count, with canonical trailing zero bits. Differing ranges split until they hold at most 32 ids, then full ids are exchanged through `Ids` and the existing v1 `Item`/`Done` transfer and budget apply. |
+
+Telemetry is never offered to `SyncItem`. A peer without either capability
+stays on the beacon-digest path. Equal digests end the exchange without
+releasing the link, which may still carry ordinary traffic.
+
+### Spray tickets, receipts and immunity
+
+Direct packets use binary spray-and-wait (MSH-16, `CAP_SPRAY_V1`). A six-byte
+envelope before the encoded packet carries magic `0x54`, version `1`, tag `1`,
+one byte of remaining copies and a little-endian inner length. A
+non-destination contact receives `floor(copies_left / 2)` tickets; the
+destination receives one and ends the spray. The same count survives store and
+sync as `StoreMetadata::copies_left` and `SyncFrame::SprayItem`; the engine
+holds at most 4096 live tickets.
+
+A successful authenticated delivery on a `CAP_RECEIPT_V1` link emits a signed
+receipt envelope. Verification is self-contained: the attached public identity
+is proved to own the original destination, the acknowledged id is re-derived,
+and the acknowledgement is checked under the existing packet domain. An
+accepted receipt produces `MeshOutput::Purge` for the host store and
+`MeshOutput::Delivered` at the origin. It also inserts a bounded immunity
+entry: 512 ids, 300 seconds, 16 frames per contact burst. Immune ids are not
+relayed, re-stored or served from sync. This is distinct from aoIdents'
+recipient-side `ReplayGuard` and from the forwarding seen-cache.
+
+### Restart snapshots
+
+The host owns the MSH-29 snapshot bytes. `MeshEngine::snapshot()` emits magic
+`AMSH`, version `1`, four little-endian section counts and BTreeMap-ordered
+sections for seen entries, seen eviction order, receipt immunity and spray
+tickets. Stored packets, config, clock, RNG state and link capabilities are
+deliberately excluded. `MAX_SNAPSHOT_LEN` is 4 MiB; bad magic, wrong version,
+oversized or truncated input, trailing bytes, count mismatches, duplicate
+entries and invalid receipt wires are typed `SnapshotError` values before any
+state changes. Restore uses the same config and RNG seed, then the host
+re-announces live links with `MeshInput::LinkUp`.
+
+Sources: aoMesh `src/store.rs`, `src/sync.rs`, `src/spray.rs`, `src/receipt.rs`,
+`src/snapshot.rs`, `docs/adr/message-store.md`, `docs/protocol.md` and ADR-0001.
