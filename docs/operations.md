@@ -257,3 +257,96 @@ local patches: a fresh checkout of each tag, with no `.cargo/config.toml`
 override, must build and pass its checks. The `v0.1.0` release tag for the
 stack is only complete once aoheyra consumes all three siblings with no local
 patches (MSH-31).
+
+## Diagnostics and data lifecycle (DOC-10)
+
+APP-15 (diagnostics bundle) and APP-16 (data lifecycle) are planned M6 work in
+aoheyra; neither is implemented yet. This section records their contract so
+the implementation can be checked against it. The pieces that already exist —
+aoMesh's `MeshSnapshot` and aoNetwork's `Snapshot` — are plain-data, redacted
+by construction, and are the only machine state a bundle may contain. A valid
+bundle therefore contains no message text and no keys.
+
+### Diagnostics allow list
+
+A bundle is an exportable archive assembled by the app from these sources:
+
+| Source | Allowed fields | Why it is safe |
+|---|---|---|
+| aoMesh `MeshSnapshot` (MSH-30, version 1) | `version`, `duplicate_packets`, `suppressed_relays`, `store_entries`, `sync_bytes_sent`, `sync_bytes_received`, `neighbour_penalty_events`, `neighbour_penalty_total`, `neighbour_penalty_max`, `penalised_neighbours`, `seen_records`, `suppression_pending` | Fixed-width saturating counters and gauges only; no ids, keys, content or personal data |
+| aoNetwork `Snapshot` (NET-23) | `at`, `mode`, `links`, `peers`, `hints`, `blocked`, `counters` (`links_up`, `links_down` breakdown, `connects_failed`, `queue_drops`, `queue_full`, `strikes`, `blacklisted`) | Links, counters and modes, no payloads |
+| aoNetwork link table | `LinkId`, `PeerKey` as an opaque radio address, role, class, state, `up_at`, link metrics, `queued_bytes` | `PeerKey` is a 16-byte radio peer key, typically a BLE address truncation or hash, not a contact or identity |
+| Device info | OS version, app version, device model class, radio state, battery profile | Debug metadata only; no account identifiers |
+| Redacted logs | Typed event names, codes, counters, durations | Strings are emitted from fixed templates, never from message content |
+
+`store_entries` is the live-id count from the most recent `MeshInput::StoreSummary`,
+not a byte count and not a list of ids. Snapshot values are deterministic for a
+fixed input stream; hostile traffic can only saturate a counter, never grow a
+map. A consumer must switch on `version` before reading fields.
+
+### Diagnostics deny list
+
+A bundle must **never** contain:
+
+- message text, or any decoded application payload field (location coordinates,
+  profile name or bio, receipt text);
+- encoded packets or payload bytes, even inside a nested blob;
+- private keys, identity seeds, keystore handles, backup passphrases or any
+  secret type's `Debug` output (aoIdents prints `<redacted>`);
+- `MessageId`, `NodeId`, `IdentityCard` contents, contact names or phone
+  numbers; opaque 8-byte card hashes are the only contact-derived value allowed,
+  and only where a freshness check needs them;
+- precise location bytes, map queries or nearby-contact identifiers;
+- raw log lines that interpolate user-supplied strings.
+
+A snapshot schema change that adds a field must be reviewed against this list
+in the same PR. aoMesh's `MESH_SNAPSHOT_VERSION` bumps when a field's meaning
+changes; that does not change packet, sync or beacon bytes.
+
+### Data lifecycle
+
+| Setting / action | Contract |
+|---|---|
+| Retention | User-selectable lifetimes for messages and carried store entries, validated against the class ceilings; expiry uses relative age, never a device clock comparison |
+| secure wipe ("panic") | Drop the identity seed, all keys and the database; a restart creates a fresh identity and no old data is readable |
+| Backup | Passphrase-encrypted export of identity and contacts using aoIdents Argon2id backup (IDN-06); never plaintext |
+| Restore | Authenticated import of a backup into a fresh vault; a wrong passphrase fails closed |
+| `VACUUM` | Reclaim space in the SQLCipher-encrypted SQLite database after retention or a bulk delete |
+| Auto-backup exclusion | Exclude the database and snapshot files from Android auto-backup; all data stays on the device unless the user explicitly exports it |
+
+The encrypted database key is held by the Android Keystore through aoheyra's
+`SecretVault` seam; there is no Room database and Kotlin reads only through
+UniFFI. APP-16 builds on APP-04 storage and IDN-06 backup; both are planned.
+
+### Validation commands
+
+Run these from the relevant repository checkout. The aoMesh and aoNetwork
+commands exist today; the aoheyra bundle test is introduced by APP-15 and the
+wipe test by APP-16, so their names are contracts, not claims of current code.
+
+```bash
+# aoMesh: snapshot schema and counter behaviour
+cargo test -p ao_mesh --test observability
+# equivalently, from a crates/ao_mesh checkout: cargo test --test observability
+
+# aoNetwork: link table, counters and snapshot fields
+cargo test -p ao_network --test observe_tests
+
+# aoheyra (APP-15): sample bundle contains no secret or message text
+cargo test -p aoheyra --test diagnostics_bundle bundle_contains_no_secrets -- --nocapture
+unzip -p sample-bundle.zip | grep -Eai 'password|passphrase|seed|secret|private.?key|message.?text'
+
+# aoheyra (APP-16): after wipe, a restart has a fresh identity and no old data
+cargo test -p aoheyra --test data_lifecycle wipe_then_restart_is_fresh -- --nocapture
+```
+
+The two aoheyra test names are acceptance-test names for APP-15 and APP-16,
+not tests that exist on `master`. The `unzip` pipeline is a reviewer check: it
+must print nothing for a compliant bundle; replace `sample-bundle.zip` with the
+actual export. The archive must also be inspected for known message strings
+from the sample conversation.
+
+`tests/observability.rs` in aoMesh pins the fixed snapshot layout and asserts
+that all fields are integers with no content. A reviewer of a sample bundle
+should additionally grep the archive for known message strings and for any
+field named like a key, seed or password; the archive must contain neither.
