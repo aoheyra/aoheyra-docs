@@ -585,3 +585,113 @@ change any packet, sync or beacon bytes.
 
 Sources: aoMesh `src/presence.rs`, `src/directory.rs`, `src/routehint.rs`,
 `src/telemetry.rs`, `src/observability.rs`, `docs/protocol.md` and ADR-0001.
+
+## Application payload schema and privacy (DOC-09)
+
+This schema is owned by aoheyra. aoMesh treats these bytes as **opaque**: it
+chooses a `PacketClass` for them, bounds them at 2048 bytes and relays them
+without reading a single application field. aoIdents seals and signs them.
+The implementation and round-trip tests are in APP-07
+(`crates/aoheyra/src/payload.rs`); the sharing-session rules are the contract
+of APP-12. Source of truth: [aoheyra ADR-0003](https://github.com/aoheyra/aoheyra/blob/master/docs/adr/0003-app-payload-schema.md)
+and the payload module.
+
+### Versioned payload table
+
+Every payload starts with a one-byte version (`PAYLOAD_VERSION = 1`) and a
+one-byte kind. Unknown versions and kinds are rejected with a typed
+`PayloadError`; decoding consumes the input exactly, so trailing bytes are
+rejected. All integers are big-endian.
+
+The implementation names the caps `MAX_TEXT_BYTES = 1024`,
+`MAX_TEXT_ENCODED_LEN = 4 + MAX_TEXT_BYTES`,
+`MAX_PROFILE_ENCODED_LEN = 4 + 32 + 1 + 160 + 8 = 205`,
+`RECEIPT_ENCODED_LEN = 19`, `OFF_ENCODED_LEN = 7`,
+`PRECISE_ENCODED_LEN = 17`, `PRECISE_WITH_HEADING_ENCODED_LEN = 19` and
+`MAX_ENCODED_LEN = 2048`. The approximate-location constants are
+`APPROX_100M_GRID_E6 = 1000` and `APPROX_100M_ACCURACY_M = 150`.
+
+| Kind | ID | Layout | Size | Mesh class |
+|---|---:|---|---|---|
+| Text | 1 | `ver | kind | text_len:u16 | UTF-8 text` | 4..1028 bytes (text 1..=1024) | Direct |
+| Location | 2 | `ver | kind | precision_flags | timestamp_s:u32 | [lat_e6:i32, lon_e6:i32, accuracy_m:u16, heading_tenths:u16]` | 7 / 17 / 19 bytes | Telemetry |
+| Profile | 3 | `ver | kind | flags | name_len:u8 | name | bio_len:u8 | bio | [avatar_hash:8]` | up to 205 bytes | Presence |
+| Receipt | 4 | `ver | kind | status:u8 | message_id:16` | 19 bytes | Direct |
+
+Text must be non-empty UTF-8 and at most 1024 bytes. A profile name is at most
+32 bytes, a bio at most 160 bytes, and the optional 8-byte avatar hash is an
+opaque application identifier, never an encryption key; its presence is
+signalled by bit 0 of the profile flags. A receipt status is 1 (delivered) or
+2 (read) and carries the 16-byte id of the message being acknowledged. This is
+the application-level status shown in chat and is distinct from aoMesh's
+internal signed receipt envelope (MSH-17), which never sees an application
+payload. The maximum encoded size of any kind fits inside one mesh packet,
+so no application payload needs fragmentation.
+
+### Location encoding
+
+Coordinates are signed 1e-6 degrees, the unit Android locations use, with
+latitude in ±90,000,000 and longitude in ±180,000,000. `timestamp_s` is a
+`u32` Unix timestamp in whole seconds. Accuracy is an unsigned 16-bit value in
+metres and must be positive whenever coordinates are present. Heading, when
+bit 7 of `precision_flags` is set, is an unsigned 16-bit value in tenths of a
+degree, 0..=3600. Bit 7 is forbidden with precision `off`, and bits 2..6 must
+be zero.
+
+| Precision | Bits 0..1 | Encoded length | Coordinates on the wire |
+|---|---:|---:|---|
+| Precise | 0 | 17 bytes, or 19 with heading | Exactly the supplied 1e-6 degree values |
+| About 100 m | 1 | 17 bytes, or 19 with heading | Rounded onto a 0.001 degree grid before leaving the device |
+| Off | 2 | 7 bytes | None: no coordinates, accuracy or heading |
+
+`About 100 m` rounds to the nearest 1000 units of 1e-6 degrees (0.001 degrees,
+about 111 m of latitude at the equator) with halfway points upward, and forces
+accuracy to at least 150 m. The constructor applies this rounding before any
+bytes exist, so neither the in-memory value nor the encoded payload ever
+holds the precise input. A decoder rejects an `About 100 m` payload whose
+coordinates are off-grid or whose accuracy is finer than the grid supports;
+it does not silently treat it as precise. `Off` discards coordinates, accuracy
+and heading at construction, and all coordinate accessors return `None`.
+
+### Privacy contract
+
+- **No network egress without user action.** Nothing leaves the device unless
+  the user explicitly shares or exports it. The schema defines bytes, not a
+  trigger: no field, constructor or codec starts a radio or network operation,
+  and no field permits network egress without user action.
+- **Precise coordinates never leave the device** unless the sharing session
+  is explicitly set to precise. The `About 100 m` quantisation and `Off`
+  elision are enforced at construction, and tests inspect outgoing bytes to
+  prove the precise values are absent.
+- **Sessions, not broadcasts.** APP-12 shares with named recipients for a
+  chosen duration at a chosen precision, sealed to those contacts and never
+  public by default. Sessions expire on their own.
+- **Stop sharing is immediate.** The user's stop sharing action publishes an
+  end to an existing session at once, so recipients stop showing the position
+  and stale updates do not continue to be relayed. This is a contract of
+  APP-12, which is planned and not yet implemented; do not claim it is present
+  in code.
+- **Transit protection only.** A sealed location payload is confidential on
+  the wire, but a malicious recipient can forward what it receives; there is
+  no post-delivery control. aoIdents' threat model lists this as an accepted
+  MVP limit.
+
+### Traceability to tests
+
+APP-07 round-trip tests, traceable by name in the payload module:
+
+| Test | Property proved |
+|---|---|
+| `round_trip_text` | Text, including multibyte UTF-8 and the 1024-byte maximum, survives encode/decode |
+| `round_trip_location_precise_with_heading` | Full 19-byte precise location round-trips |
+| `round_trip_location_approx_100m` | Approximate coordinates are on-grid and accuracy is at least 150 m |
+| `round_trip_location_off` | `Off` uses exactly 7 bytes and carries no coordinates |
+| `round_trip_profile`, `round_trip_receipt` | Profile and receipt round-trip at their caps |
+| `approx_100m_never_encodes_precise_coordinates` | Precise byte patterns are absent from the approximate payload |
+| `off_never_encodes_coordinates` | `Off` bytes contain no coordinate patterns |
+| `per_variant_caps_fit_inside_mesh_payload` | Every kind fits the aoMesh 2048-byte cap |
+| `packet_class_mapping_uses_real_mesh_classes` | Text/Receipt to Direct, Location to Telemetry, Profile to Presence |
+
+APP-12 adds the outgoing-payload inspection test for session precision and
+the immediate-stop behaviour; it is not implemented yet and must be linked
+here when it lands.
