@@ -21,3 +21,7 @@ jobs:
           for f in docs/ownership.md docs/protocol.md docs/operations.md; do
             test -s "$f"
           done
+      - name: markdown links and workflow syntax
+        run: bash scripts/validate-docs.sh
+      - name: validate DOC-01 ownership map
+        run: python3 scripts/check_doc_01.py
