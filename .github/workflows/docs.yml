@@ -52,3 +52,5 @@ jobs:
         run: bash scripts/validate-docs.sh
       - name: validate DOC-08 build and release
         run: python3 scripts/check_doc_08.py
+      - name: validate DOC-09 payload schema
+        run: python3 scripts/check_doc_09.py
