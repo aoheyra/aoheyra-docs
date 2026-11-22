@@ -33,5 +33,7 @@ jobs:
         run: python3 scripts/check_doc_02.py
       - name: validate DOC-03 BLE contract
         run: python3 scripts/check_doc_03.py
+      - name: validate DOC-04 identity and trust
+        run: python3 scripts/check_doc_04.py
       - name: markdown links and workflow syntax
         run: bash scripts/validate-docs.sh
