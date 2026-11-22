@@ -31,5 +31,7 @@ jobs:
         run: python3 scripts/check_doc_01.py
       - name: validate DOC-02 packet reference
         run: python3 scripts/check_doc_02.py
+      - name: validate DOC-03 BLE contract
+        run: python3 scripts/check_doc_03.py
       - name: markdown links and workflow syntax
         run: bash scripts/validate-docs.sh
