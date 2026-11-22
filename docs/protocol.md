@@ -454,3 +454,134 @@ re-announces live links with `MeshInput::LinkUp`.
 
 Sources: aoMesh `src/store.rs`, `src/sync.rs`, `src/spray.rs`, `src/receipt.rs`,
 `src/snapshot.rs`, `docs/adr/message-store.md`, `docs/protocol.md` and ADR-0001.
+## Mesh-wide ephemeral state and its bounds
+
+All state in this section is local, bounded and ephemeral. aoMesh's
+**`NodeDirectory`** is a mesh-wide view built from verified presence facts;
+aoNetwork's **neighbour table** is a radio-local view of discovered peers that
+evicts after 30 seconds. They are different tables with different purposes.
+aoheyra's map-data service derives map items from both: directory facts supply
+distant nodes and last known location, and the link view supplies currently
+connected neighbours. Neither table is persisted by aoMesh.
+
+The source of truth for every parameter is the MSH-02 table in
+[aoMesh ADR-0001](https://github.com/aoheyra/aoMesh/blob/master/docs/adr/0001-routing-per-traffic-class.md)
+and the `Default` implementation of each config struct; do not change a number
+here without the measured justification required by MSH-02.
+
+### Presence announcements (MSH-19)
+
+A Presence announcement is an ordinary signed `PacketClass::Presence` packet
+with no destination and TTL clamped to 3. It is emitted and accepted only on
+links whose negotiated caps include `CAP_PRESENCE_V1` (`1 << 4`). The fixed
+150-byte payload is:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 1 | Magic `0x56` |
+| 1 | 1 | Version `1` |
+| 2 | 8 | `card_hash` announcement hash |
+| 10 | 4 | Capability bits, big-endian |
+| 14 | 8 | Per-origin monotonic `seq`, big-endian |
+| 22 | 32 | Origin Ed25519 verification key |
+| 54 | 32 | Origin X25519 agreement key |
+| 86 | 64 | Agreement-key binding signature |
+
+Every relay verifies the body, derives `origin` from the carried keys and
+checks the packet signature under `aoheyra/mesh/v1/packet`. The host borrows its
+identity and card hash on each `MeshInput::Tick`, declares resolvable hashes
+through `MeshInput::KnownCards`, and consumes `MeshOutput::CardFetch`. The
+engine retains no key.
+
+| `PresenceConfig` default | Value | Reason |
+|---|---:|---|
+| `enabled` | `true` | Cap-gated on each link. |
+| `max_entries` | 1024 | Bounds learned nodes. |
+| `max_known_cards` | 1024 | Bounds one host input. |
+| `quick_ms` | 1000 ms | Bounded convergence after a change. |
+| `base_interval_ms` | 60_000 ms | First quiet refresh. |
+| `steady_interval_ms` | 900_000 ms | 15-minute steady bound. |
+| `lifetime_s` | 1800 s | Matches the ADR-0001 30-minute lifetime. |
+
+A change carries its scheduled facts, so later ticks cannot postpone the first
+announcement. Quiet refreshes double from one minute to the steady bound.
+Fresh announcements use suppression with Presence TTL 3 and are sent only to
+capable links.
+
+### NodeDirectory (MSH-20)
+
+An observation is typed: node id, card hash, caps, per-origin `seq`, estimated
+hop distance, via-node, observation time and opaque bounded location bytes.
+The directory does not fetch cards or interpret location. Entries expire from
+local receipt time using a high-water-mark clock; peer-supplied observation
+time is clamped for display ordering only and cannot change expiry.
+
+| `DirectoryConfig` default | Value | Reason |
+|---|---:|---|
+| `capacity` | 256 | About 80 KiB with indexes. |
+| `stale_after_ms` | `30 * 60 * 1_000` ms | One missed trickle refresh is tolerated. |
+| `max_location_bytes` | 64 | Bounds hostile claims; schema belongs to MSH-22/APP-07. |
+| `max_change_events` | 64 | Coalesced UI events per node. |
+
+A lower `seq` is ignored. An equal or higher `seq` refreshes local freshness
+and LRU position but emits an `Updated` event only when a visible field
+changes. A full table evicts least-recently-seen. Changes reach the host as
+`MeshOutput::DirectoryChanged`; the UI queries entries rather than receiving
+location bytes in the event stream.
+
+### Reverse-path route hints (MSH-21)
+
+A hint says: the freshest observation for destination D arrived from verified
+neighbour N, H hops away. It is local routing advice, never signed, never sent
+to a peer and never used to authenticate a packet. Sources are verified MSH-19
+announcements through the directory and host facts through
+`MeshInput::ObserveNode`. Observations from links that are down or unverified
+are ignored, as are zero-hop or over-ceiling hop counts.
+
+| `RouteHintConfig` default | Value | Reason |
+|---|---:|---|
+| `mode` | `SubstituteCopy` | Measured latency win with unchanged transmissions. |
+| `max_entries` | 1024 | Bounded per-destination state. |
+| `lifetime_ms` | 300_000 ms | Shorter than one presence refresh. |
+| `max_hops` | 8 | Matches Direct's TTL. |
+
+Hints rank by `(hops ascending, seq descending, LinkId ascending)`; an exact
+tie does not refresh expiry. `Tick` expires hints and `LinkDown` removes every
+hint supplied by that link. With `SubstituteCopy`, a fresh hint replaces one
+ordinary spray recipient, so transmission count and ticket accounting do not
+grow. `AdditiveUnicast` was measured and rejected because it added one send.
+
+### Telemetry (MSH-22)
+
+Telemetry reuses class 4 and the existing packet signature domain. Its opaque
+payload prefix is version `1`, a one-byte application `kind` and a big-endian
+`u64` sequence. The coalescing key is BLAKE3 over
+`aoheyra/mesh/v1/telemetry/coalesce || origin(16) || kind(1)`, so a newer
+sequence replaces an older waiting frame in aoNetwork's send queue. aoMesh
+does not interpret `kind`.
+
+| `TelemetryConfig` default | Value | Reason |
+|---|---:|---|
+| `expiry_ms` | 30_000 ms | Tighter than ADR-0001's original 5-minute value. |
+| `rate_limit_ms` | 10_000 ms | One accepted update per origin per 10 s. |
+| `hop_limit` | 3 | Same class TTL as ADR-0001. |
+| `max_entries` | 512 | Bounds freshness and rate state. |
+
+The effective window is `min(sender lifetime, 30 s)`. Remote `created_ms` is
+ignored; local monotonic `now` alone drives freshness, eviction and throttling.
+Stale, expired, throttled and hop-limited updates are silent drops. Only
+malformed frames or content-address mismatches earn a neighbour penalty.
+Telemetry is never stored or synced.
+
+### Redacted diagnostics view
+
+The MSH-30 `MeshSnapshot` exposes only counters and gauges: duplicate
+verdicts, suppressed relays, store id count, sync bytes, neighbour penalty
+events and current scores, seen-cache records and pending suppression windows.
+All content-derived fields are **redacted by omission**: no packet text,
+`MessageId`, key, identity, contact identifier or coordinate appears in the
+snapshot. Adding or changing a field bumps `MESH_SNAPSHOT_VERSION`; it does not
+change any packet, sync or beacon bytes.
+
+Sources: aoMesh `src/presence.rs`, `src/directory.rs`, `src/routehint.rs`,
+`src/telemetry.rs`, `src/observability.rs`, `docs/protocol.md` and ADR-0001.
