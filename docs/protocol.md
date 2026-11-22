@@ -240,3 +240,109 @@ in callback order. Across links no ordering is promised.
 
 Source: aoNetwork's `docs/native-contract.md`, `README.md` and the NET-03 to
 NET-14 issue scopes in the ownership backlog.
+## Identity and trust model
+
+aoIdents owns identity, signatures, sealed messages, contact trust and replay
+rejection. Its normative sources are
+[ADR-0001](https://github.com/aoheyra/aoIdents/blob/master/docs/adr/0001-crypto-suite-and-encodings.md)
+and the [threat model](https://github.com/aoheyra/aoIdents/blob/master/docs/threat-model.md)
+(IDN-19). No secret material, sample private key or placeholder key value is
+recorded here.
+
+### Cryptographic suite and identities
+
+Suite ID `0x01` fixes Ed25519 signatures, X25519 agreement,
+XChaCha20-Poly1305 AEAD, BLAKE3 hashes, HKDF-SHA-256, Argon2id for backups and
+Noise XX `25519_ChaChaPoly_SHA256` for the optional hop handshake. Every signed
+or hashed structure uses one registered domain string; the signature preimage
+is `u8 domain_len || domain || msg`, so a signature from another use cannot be
+reused.
+
+| Concept | Owner and contract |
+|---|---|
+| Seed | 32 bytes from injected CSPRNG, or fixed input for tests. Signing and agreement keys are derived with distinct HKDF info strings. |
+| `NodeId` | `BLAKE3("aoheyra/idn/v1/node-id" || 0x01 || signing_pk || agreement_pk)[..16]`. aoMesh treats these 16 bytes as opaque. |
+| Agreement binding | The agreement public key is signed under `aoheyra/idn/v1/bind-agreement`; a substituted key is detectable. |
+| `IdentityCard` | Self-signed card carrying the public facts used by contacts and the 8-byte announcement hash. QR strings are `aoheyra:id:<base32>`. |
+| Safety number | BLAKE3 under `aoheyra/idn/v1/safety-number`, compared out of band. It is a comparison aid, not a security boundary. |
+
+Secret types zeroize on drop, print `<redacted>` in `Debug`, use explicit
+`Clone` and constant-time comparison where needed, and take time and randomness
+as parameters. aoheyra holds keys behind the `KeyStore` seam and Android
+Keystore; aoMesh and aoNetwork never keep them.
+
+### Rotating tags and sealed content
+
+`RotatingTag` produces a 16-byte link tag and an 8-byte beacon hint per epoch.
+aoIdents generates them, aoMesh passes the bytes down and aoNetwork carries
+them in `Hello` and beacons for duplicate-link tie-breaking only. aoNetwork
+does not interpret, validate or link a tag to a `NodeId`. Successive epochs
+are unlinkable in the baseline mode; a pairwise contact-recognisable mode is a
+setting behind a flag, not the default.
+
+Messages are sealed with aoIdents' AEAD and signed under registered domains:
+
+- `SealedMessage` (IDN-09) is the 1:1, offline-friendly form. It authenticates
+  the sender inside the seal, binds the envelope to the mesh content address as
+  associated data, and is addressed to the recipient's public identity.
+- Multi-recipient sealed messages (IDN-10) wrap a content key per recipient.
+  They use the `aoheyra/idn/v1/wrap` derivation and do not change the mesh
+  packet header.
+- Public blobs (IDN-11) carry signed presence and channel facts.
+
+Relays cannot read content. They do see the mesh header, so origin and
+destination are cleartext metadata by design; see the limits below.
+
+### Replay protection, contacts and trust
+
+Replay checks are layered and must not be merged:
+
+| Check | Owner | Purpose |
+|---|---|---|
+| `ReplayGuard` | aoIdents, at the recipient | Accepts each `(origin, msg_id)` once within a bounded window. The authenticated local-delivery path uses 1024 ids per sender, 24-hour timestamp tolerance and 64 senders. |
+| seen-cache | aoMesh, at every relay | Forwarding dedupe by content address. It is not an acceptance check and never sees keys. |
+| Receipt immunity | aoMesh, policy only | Bounded list of already acknowledged ids that are not relayed, re-stored or served by sync. |
+
+Trust is trust-on-first-use plus out-of-band comparison. There is no server,
+certificate authority or global directory. A contact stores the first key seen
+for a `NodeId`; safety numbers let the user compare it out of band. A changed
+key for a known node raises a typed key-change warning rather than being
+accepted silently. Rotation statements and revocation notices are signed under
+their own domains (IDN-16); a thief who controls an unlocked device can delay
+their propagation until contacts receive and act on them.
+
+### Optional neighbour authentication
+
+The hop handshake (IDN-13, M6) is a sans-IO Noise XX state machine driven by
+aoMesh over Control frames. The host pins the peer's card by its 8-byte
+announcement hash and owns the resulting per-link `HopSessions` outside the
+engine. A failed pin or handshake installs no session and never silently falls
+back to cleartext. On an encrypted link a radio observer still sees timing and
+frame sizes.
+
+### What is deliberately not protected
+
+IDN-19 states the MVP limits explicitly:
+
+- **relay-visible metadata:** origin and destination are visible to every
+  relay and radio observer so relays can rate-limit spam (MSH-02). Traffic
+  sizes, timing and the contact graph are likewise exposed. Rotating tags hide
+  long-term link identity, not packet headers.
+- **Deferred forward secrecy:** sealed v1 binds to the recipient's static
+  agreement key. Compromise of that key decrypts stored ciphertext ever sealed
+  to it. IDN-15 prekeys improve this for messages sealed under deleted prekeys;
+  a full ratchet is out of scope.
+- Availability is best effort: a relay can drop or delay traffic. Post-delivery
+  control of location is impossible; a malicious recipient can forward what it
+  receives.
+- First-contact impersonation survives until the user compares safety numbers;
+  Sybil identities are cheap, though per-origin budgets bound each one.
+
+Layer responsibilities are disjoint: aoNetwork protects the link with
+per-link rate limits, strikes and liveness, aoMesh protects routing with headers, budgets
+and dedupe, aoIdents protects content and identity, and aoheyra owns
+persistence, keystore and OS integration.
+
+Source: aoIdents `docs/threat-model.md`, `docs/adr/0001-crypto-suite-and-encodings.md`,
+and aoMesh `docs/protocol.md` sections on authenticated local delivery,
+mesh hello and replay integration.
