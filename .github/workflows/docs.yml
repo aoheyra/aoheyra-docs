@@ -50,3 +50,5 @@ jobs:
         run: python3 scripts/check_doc_07.py
       - name: markdown links and workflow syntax
         run: bash scripts/validate-docs.sh
+      - name: validate DOC-08 build and release
+        run: python3 scripts/check_doc_08.py
