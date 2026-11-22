@@ -35,5 +35,7 @@ jobs:
         run: python3 scripts/check_doc_03.py
       - name: validate DOC-04 identity and trust
         run: python3 scripts/check_doc_04.py
+      - name: validate DOC-05 store lifecycle
+        run: python3 scripts/check_doc_05.py
       - name: markdown links and workflow syntax
         run: bash scripts/validate-docs.sh
