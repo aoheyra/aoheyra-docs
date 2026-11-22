@@ -39,5 +39,14 @@ jobs:
         run: python3 scripts/check_doc_05.py
       - name: validate DOC-06 ephemeral state
         run: python3 scripts/check_doc_06.py
+      - name: checkout fuzz inventory
+        uses: actions/checkout@v4
+        with:
+          repository: aoheyra/aoheyra-fuzz
+          path: .fuzz-inventory
+      - name: validate DOC-07 fuzz inventory
+        env:
+          FUZZ_REPO: ${{ github.workspace }}/.fuzz-inventory
+        run: python3 scripts/check_doc_07.py
       - name: markdown links and workflow syntax
         run: bash scripts/validate-docs.sh
