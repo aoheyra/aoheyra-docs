@@ -316,13 +316,13 @@ changes; that does not change packet, sync or beacon bytes.
 
 The encrypted database key is held by the Android Keystore through aoheyra's
 `SecretVault` seam; there is no Room database and Kotlin reads only through
-UniFFI. APP-16 builds on APP-04 storage and IDN-06 backup; both are planned.
+UniFFI. APP-16 builds on APP-04 storage and IDN-06 backup; its policy is
+implemented in `aoheyra::lifecycle`.
 
 ### Validation commands
 
-Run these from the relevant repository checkout. The aoMesh and aoNetwork
-commands exist today; the aoheyra bundle test is introduced by APP-15 and the
-wipe test by APP-16, so their names are contracts, not claims of current code.
+Run these from the relevant repository checkout. All four commands exist on
+their repositories' master branches.
 
 ```bash
 # aoMesh: snapshot schema and counter behaviour
@@ -333,18 +333,16 @@ cargo test -p ao_mesh --test observability
 cargo test -p ao_network --test observe_tests
 
 # aoheyra (APP-15): sample bundle contains no secret or message text
-cargo test -p aoheyra --test diagnostics_bundle bundle_contains_no_secrets -- --nocapture
-unzip -p sample-bundle.zip | grep -Eai 'password|passphrase|seed|secret|private.?key|message.?text'
+cargo test -p aoheyra sample_bundle_has_no_message_text_or_peer_key -- --nocapture
 
 # aoheyra (APP-16): after wipe, a restart has a fresh identity and no old data
-cargo test -p aoheyra --test data_lifecycle wipe_then_restart_is_fresh -- --nocapture
+cargo test -p aoheyra panic_wipe_restarts_with_a_fresh_identity -- --nocapture
 ```
 
-The two aoheyra test names are acceptance-test names for APP-15 and APP-16,
-not tests that exist on `master`. The `unzip` pipeline is a reviewer check: it
-must print nothing for a compliant bundle; replace `sample-bundle.zip` with the
-actual export. The archive must also be inspected for known message strings
-from the sample conversation.
+For a real exported archive, a reviewer can additionally run
+`unzip -p sample-bundle.zip | grep -Eai 'password|passphrase|seed|secret|private.?key|message.?text'`;
+it must print nothing. The archive must also be inspected for known message
+strings from the sample conversation.
 
 `tests/observability.rs` in aoMesh pins the fixed snapshot layout and asserts
 that all fields are integers with no content. A reviewer of a sample bundle
