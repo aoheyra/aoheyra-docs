@@ -54,3 +54,5 @@ jobs:
         run: python3 scripts/check_doc_08.py
       - name: validate DOC-09 payload schema
         run: python3 scripts/check_doc_09.py
+      - name: validate DOC-10 diagnostics and data lifecycle
+        run: python3 scripts/check_doc_10.py
