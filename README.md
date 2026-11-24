@@ -18,6 +18,7 @@ communication labels, not new crates or wire formats. See
 - [Call stacks and request paths](docs/call-stacks.md): function-level call chains for every service, with diagram notes and current-versus-target status.
 - [Ownership](docs/ownership.md): one owner per concept and dependency direction.
 - [Protocol](docs/protocol.md): packet layout, capability negotiation and wire evolution.
+- [LLD](docs/lld.md): smart routing, congestion control, battery-aware priority, router roles, public/private networks with authN/authZ, headless devices, device profiles, and the minimal-Kotlin JNI bridge.
 - [Operations](docs/operations.md): build, release, fuzzing and diagnostics.
 
 Each document is owned by the issue that created it. See the repository issues
